@@ -60,29 +60,38 @@ def _biquad_coeffs(sr):
     return [(b1, a1), (b2, a2), (b3, a3)]
 
 
-def _apply_biquad_cascade(x, sections, states):
-    for k, (b, a) in enumerate(sections):
-        w1, w2 = states[k]
-        y = np.empty_like(x)
-        for n in range(len(x)):
-            w0 = x[n] - a[1] * w1 - a[2] * w2
-            y[n] = b[0] * w0 + b[1] * w1 + b[2] * w2
-            w2, w1 = w1, w0
-        states[k] = [w1, w2]
-        x = y
-    return x
-
-
 class AudioEngine:
     def __init__(self, sample_rate=44100):
         self.sample_rate = sample_rate
         self.event_queue = queue.Queue()
         self.open_frequencies = [82.41, 110.00, 146.83, 196.00, 246.94, 329.63]
         self.current_frequencies = list(self.open_frequencies)
-        self.active_strings = [None] * 6
 
+        # Pre-allocated maximum delay line arrays to handle structural upper bounds
+        self.max_delay_size = int(sample_rate / 40.0)  # Safe buffer down to a low 40Hz note
+        self.ring_buffers = np.zeros((6, self.max_delay_size), dtype=np.float32)
+        self.buffer_lengths = np.zeros(6, dtype=np.int32)
+        self.buffer_pointers = np.zeros(6, dtype=np.int32)
+
+        # PRE-ALLOCATED NOISE RESERVOIRS (Pure Zero-Allocation System)
+        self.noise_pool_size = 44100
+        self.raw_noise_pool = np.random.uniform(-1.0, 1.0, self.noise_pool_size).astype(np.float32)
+        self.soft_noise_pool = np.convolve(self.raw_noise_pool, np.ones(3) / 3, mode='same').astype(np.float32)
+        self.noise_index = 0
+
+        # State tracking matrices
+        self.string_active = np.zeros(6, dtype=bool)
+        self.string_decay = np.zeros(6, dtype=np.float32)
+        self.string_S = np.zeros(6, dtype=np.float32)
+
+        # Pre-allocated convolution overlap and mixer buffers
         self._ir = _make_body_ir(sample_rate)
         self._ir_overlap = np.zeros(len(self._ir) - 1, dtype=np.float32)
+
+        # Pre-allocate a steady workspace accumulation buffer for safe overlap addition
+        self.accum_buffer = np.zeros(256 + len(self._ir) - 1, dtype=np.float32)
+        self.mix_buffer = np.zeros(256, dtype=np.float32)
+        self.iir_buffer = np.zeros(256, dtype=np.float32)
 
         self._iir_sections = _biquad_coeffs(sample_rate)
         self._iir_states = [[0.0, 0.0] for _ in self._iir_sections]
@@ -100,7 +109,6 @@ class AudioEngine:
         self.stream.stop()
 
     def set_chord(self, fret_positions):
-        """Accepts an array like [0, 2, 2, 1, 0, 0] (-1 drops string out completely)"""
         for i, fret in enumerate(fret_positions):
             if fret == -1:
                 self.current_frequencies[i] = 0.0
@@ -112,56 +120,91 @@ class AudioEngine:
             self.event_queue.put((string_idx, float(np.clip(pressure, 0.1, 1.0))))
 
     def _audio_callback(self, outdata, frames, time, status):
+        # Clear out main mixing buffer in-place
+        self.mix_buffer.fill(0.0)
+
+        # --- PROCESS PLUCK EVENTS ---
         while not self.event_queue.empty():
             idx, vel = self.event_queue.get_nowait()
             freq = self.current_frequencies[idx]
             if freq == 0.0: continue
 
             buf_size = int(self.sample_rate / freq)
-            noise = np.random.uniform(-1.0, 1.0, buf_size).astype(np.float32)
-            if vel < 0.6:
-                noise = np.convolve(noise, np.ones(3) / 3, mode='same').astype(np.float32)
-            noise *= vel
-            S, decay = _S[idx], _DBASE[idx] + vel * _DVEL[idx]
-            self.active_strings[idx] = [noise, 0, decay, S, 0.0]
+            if buf_size > self.max_delay_size: buf_size = self.max_delay_size
 
-        buffer_out = np.zeros(frames, dtype=np.float32)
+            self.buffer_lengths[idx] = buf_size
+            self.buffer_pointers[idx] = 0
+
+            start_p = self.noise_index
+            end_p = start_p + buf_size
+
+            pool = self.soft_noise_pool if vel < 0.6 else self.raw_noise_pool
+
+            if end_p < self.noise_pool_size:
+                self.ring_buffers[idx, :buf_size] = pool[start_p:end_p] * vel
+                self.noise_index = end_p
+            else:
+                rem = self.noise_pool_size - start_p
+                self.ring_buffers[idx, :rem] = pool[start_p:] * vel
+                self.ring_buffers[idx, rem:buf_size] = pool[:buf_size - rem] * vel
+                self.noise_index = buf_size - rem
+
+            self.string_S[idx] = _S[idx]
+            self.string_decay[idx] = _DBASE[idx] + vel * _DVEL[idx]
+            self.string_active[idx] = True
+
+        # --- REAL-TIME WAVEGUIDE CORE LOOP ---
         for i in range(6):
-            st = self.active_strings[i]
-            if st is None: continue
-            ring_buf, ptr, decay, S, _ = st
-            buf_len = len(ring_buf)
-            Sc, Sc1, dec = np.float32(S), np.float32(1.0 - S), np.float32(decay)
+            if not self.string_active[i]: continue
+
+            buf_len = self.buffer_lengths[i]
+            ptr = self.buffer_pointers[i]
+            dec = self.string_decay[i]
+            Sc = self.string_S[i]
+            Sc1 = 1.0 - Sc
 
             for f in range(frames):
-                cur = ring_buf[ptr]
+                cur = self.ring_buffers[i, ptr]
                 nxt_ptr = (ptr + 1) % buf_len
-                buffer_out[f] += cur
-                ring_buf[ptr] = (Sc * cur + Sc1 * ring_buf[nxt_ptr]) * dec
+                nxt = self.ring_buffers[i, nxt_ptr]
+
+                self.mix_buffer[f] += cur
+                self.ring_buffers[i, ptr] = (Sc * cur + Sc1 * nxt) * dec
                 ptr = nxt_ptr
 
-            if np.max(np.abs(ring_buf)) < 0.0004:
-                self.active_strings[i] = None
-            else:
-                self.active_strings[i][1] = ptr
+            self.buffer_pointers[i] = ptr
+            if np.max(np.abs(self.ring_buffers[i, :buf_len])) < 0.0004:
+                self.string_active[i] = False
 
-        body_iir = _apply_biquad_cascade(buffer_out.copy(), self._iir_sections, self._iir_states)
-        full_conv = np.convolve(buffer_out, self._ir).astype(np.float32)
+        # --- PROCESS RESONANCE CHAIN IN-PLACE ---
+        np.copyto(self.iir_buffer, self.mix_buffer)
 
-        # Safe structural overlap alignment matrix mapping block limits cleanly
-        accum = np.zeros(max(len(self._ir_overlap), len(full_conv)), dtype=np.float32)
-        accum[:len(self._ir_overlap)] += self._ir_overlap
-        accum[:len(full_conv)] += full_conv
-        body_ir_conv = accum[:frames]
-        self._ir_overlap = accum[frames:frames + len(self._ir) - 1]
+        for k, (b, a) in enumerate(self._iir_sections):
+            w1, w2 = self._iir_states[k]
+            for n in range(frames):
+                w0 = self.iir_buffer[n] - a[1] * w1 - a[2] * w2
+                self.iir_buffer[n] = b[0] * w0 + b[1] * w1 + b[2] * w2
+                w2, w1 = w1, w0
+            self._iir_states[k] = [w1, w2]
 
-        final_mix = (buffer_out * 0.45 + body_iir * 0.35 + body_ir_conv * 0.20)
+        # --- ZERO-ALLOCATION OVERLAP-ADD SYSTEM ---
+        self.accum_buffer.fill(0.0)
+        # 1. Load the previous block's tail overlap directly into the tracking matrix
+        self.accum_buffer[:len(self._ir_overlap)] += self._ir_overlap
 
-        # Headroom Limiter
+        # 2. Convolve current frame blocks
+        full_conv = np.convolve(self.mix_buffer, self._ir).astype(np.float32)
+        self.accum_buffer[:len(full_conv)] += full_conv
+
+        # 3. Pull out the clean output frame segment safely
+        body_ir_conv = self.accum_buffer[:frames]
+
+        # 4. Cache the leftover ring-out tail directly into the permanent overlap state array
+        self._ir_overlap[:] = self.accum_buffer[frames:frames + len(self._ir_overlap)]
+
+        # --- HEADROOM MIXING & COMPRESSION ---
         for f in range(frames):
-            val = final_mix[f] * 0.38
+            val = (self.mix_buffer[f] * 0.45 + self.iir_buffer[f] * 0.35 + body_ir_conv[f] * 0.20) * 0.38
             if abs(val) > 0.25:
                 val = np.sign(val) * (0.25 + 0.75 * np.tanh((abs(val) - 0.25) / 0.75))
-            final_mix[f] = val
-
-        outdata[:, 0] = np.clip(final_mix, -1.0, 1.0)
+            outdata[f, 0] = val

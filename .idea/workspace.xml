@@ -1,11 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="ChangeListManager">
-    <list default="true" id="e8d50ccd-b2b3-43da-b17d-9cfea070be3b" name="Changes" comment="first commit">
-      <change afterPath="$PROJECT_DIR$/preset_editor.py" afterDir="false" />
+    <list default="true" id="e8d50ccd-b2b3-43da-b17d-9cfea070be3b" name="Changes" comment="woahhhhhhh first functional build. added preset editor">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/guitar_audio.py" beforeDir="false" afterPath="$PROJECT_DIR$/guitar_audio.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -102,7 +100,7 @@
       <option name="presentableId" value="Default" />
       <updated>1782901456603</updated>
       <workItem from="1782901457620" duration="7212000" />
-      <workItem from="1782918384338" duration="5750000" />
+      <workItem from="1782918384338" duration="9170000" />
     </task>
     <task id="LOCAL-00001" summary="first commit">
       <option name="closed" value="true" />
@@ -112,7 +110,15 @@
       <option name="project" value="LOCAL" />
       <updated>1782993895268</updated>
     </task>
-    <option name="localTasksCounter" value="2" />
+    <task id="LOCAL-00002" summary="woahhhhhhh first functional build. added preset editor">
+      <option name="closed" value="true" />
+      <created>1782995800560</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1782995800560</updated>
+    </task>
+    <option name="localTasksCounter" value="3" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -120,10 +126,11 @@
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="first commit" />
-    <option name="LAST_COMMIT_MESSAGE" value="first commit" />
+    <MESSAGE value="woahhhhhhh first functional build. added preset editor" />
+    <option name="LAST_COMMIT_MESSAGE" value="woahhhhhhh first functional build. added preset editor" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
-    <SUITE FILE_PATH="coverage/SoftGuitar$main.coverage" NAME="main Coverage Results" MODIFIED="1782995093684" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/SoftGuitar$main.coverage" NAME="main Coverage Results" MODIFIED="1783018580134" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/SoftGuitar$canvas.coverage" NAME="canvas Coverage Results" MODIFIED="1782905669874" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/SoftGuitar$guitar_scribe.coverage" NAME="guitar_scribe Coverage Results" MODIFIED="1782903279353" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
   </component>
