@@ -61,11 +61,28 @@ def _biquad_coeffs(sr):
 
 
 class AudioEngine:
+    # BUILT-IN CHORD VOICING DICTIONARY
+    CHORD_DICTIONARY = {
+        "Open": [0, 0, 0, 0, 0, 0],
+        "C Major": [-1, 3, 2, 0, 1, 0],
+        "A Major": [-1, 0, 2, 2, 2, 0],
+        "A Minor": [-1, 0, 2, 2, 1, 0],
+        "G Major": [3, 2, 0, 0, 0, 3],
+        "E Major": [0, 2, 2, 1, 0, 0],
+        "E Minor": [0, 2, 2, 0, 0, 0],
+        "D Major": [-1, -1, 0, 2, 3, 2],
+        "D Minor": [-1, -1, 0, 2, 3, 1]
+    }
+
     def __init__(self, sample_rate=44100):
         self.sample_rate = sample_rate
         self.event_queue = queue.Queue()
         self.open_frequencies = [82.41, 110.00, 146.83, 196.00, 246.94, 329.63]
         self.current_frequencies = list(self.open_frequencies)
+
+        # Global Capo Tracking Register (0 = No Capo, 1 = 1st Fret, etc.)
+        self.capo_fret = 0
+        self.current_fret_positions = [0] * 6
 
         self.max_delay_size = int(sample_rate / 40.0)
         self.ring_buffers = np.zeros((6, self.max_delay_size), dtype=np.float32)
@@ -107,12 +124,31 @@ class AudioEngine:
     def stop(self):
         self.stream.stop()
 
-    def set_chord(self, fret_positions):
-        for i, fret in enumerate(fret_positions):
+    def set_capo(self, fret):
+        """Sets the global capo position and recalculates current string pitches."""
+        self.capo_fret = max(0, min(12, int(fret)))
+        self._reapply_pitches()
+
+    def set_chord(self, chord_input):
+        """Accepts either a string chord name (e.g., 'C Major') or an explicit fret list."""
+        if isinstance(chord_input, str):
+            positions = self.CHORD_DICTIONARY.get(chord_input, [0, 0, 0, 0, 0, 0])
+        else:
+            positions = chord_input
+
+        self.current_fret_positions = list(positions)
+        self._reapply_pitches()
+
+    def _reapply_pitches(self):
+        """Applies fret array choices combined with the global Capo offset."""
+        for i in range(6):
+            fret = self.current_fret_positions[i]
             if fret == -1:
-                self.current_frequencies[i] = 0.0
+                self.current_frequencies[i] = 0.0  # Muted string
             else:
-                self.current_frequencies[i] = self.open_frequencies[i] * (2.0 ** (fret / 12.0))
+                # Total half-steps = fret relative to capo + global capo fret position
+                total_frets = fret + self.capo_fret
+                self.current_frequencies[i] = self.open_frequencies[i] * (2.0 ** (total_frets / 12.0))
 
     def trigger_pluck(self, string_idx, pressure):
         if self.current_frequencies[string_idx] > 0:
@@ -157,8 +193,6 @@ class AudioEngine:
                 self.ring_buffers[idx, rem:int_period] = pool[:int_period - rem] * vel
                 self.noise_index = int_period - rem
 
-            # --- SOLIDIFIED DYNAMIC DECAY LOGIC ---
-            # Explicit scalar type conversion ensures the audio thread reads it cleanly
             decay_mod = 0.0015 * (vel - 0.5)
             self.string_decay[idx] = float(np.clip(_DBASE[idx] + decay_mod, 0.985, 0.998))
 

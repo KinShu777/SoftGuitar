@@ -24,6 +24,10 @@ class MainWindow(QMainWindow):
         self.audio = AudioEngine()
         self.audio.start()
 
+        # TEST HOOK: Load a warm C Major shape and clamp a Capo on the 2nd Fret
+        self.audio.set_capo(2)
+        self.audio.set_chord("C Major")
+
         self.open_strings = [82.41, 110.00, 146.83, 196.00, 246.94, 329.63]
         self.loaded_presets = {}
         self.active_preset_name = None
