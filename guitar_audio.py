@@ -2,11 +2,7 @@ import queue
 import sounddevice as sd
 import numpy as np
 
-# ---------------------------------------------------------------------------
-# Per-string tuning parameters
-# ---------------------------------------------------------------------------
 _STRING_PARAMS = [
-    # idx  S      decay_base  decay_vel
     (0, 0.505, 0.9940, 0.003),  # E2  82 Hz
     (1, 0.500, 0.9942, 0.003),  # A2  110 Hz
     (2, 0.495, 0.9945, 0.003),  # D3  147 Hz
@@ -19,9 +15,6 @@ _DBASE = np.array([p[2] for p in _STRING_PARAMS], dtype=np.float64)
 _DVEL = np.array([p[3] for p in _STRING_PARAMS], dtype=np.float64)
 
 
-# ---------------------------------------------------------------------------
-# Synthetic body IR — models hollow-body wood/air resonance cavity
-# ---------------------------------------------------------------------------
 def _make_body_ir(sr: int, length_ms: float = 28.0) -> np.ndarray:
     n = int(sr * length_ms / 1000)
     t = np.linspace(0, length_ms / 1000, n, endpoint=False)
@@ -32,9 +25,6 @@ def _make_body_ir(sr: int, length_ms: float = 28.0) -> np.ndarray:
     return ir.astype(np.float32)
 
 
-# ---------------------------------------------------------------------------
-# IIR 4-pole parametric body resonance cascade
-# ---------------------------------------------------------------------------
 def _biquad_coeffs(sr):
     def peak(fc, gain_db, Q):
         A = 10 ** (gain_db / 40)
@@ -83,25 +73,17 @@ def _apply_biquad_cascade(x, sections, states):
     return x
 
 
-# ---------------------------------------------------------------------------
-# Core Audio Engine Class
-# ---------------------------------------------------------------------------
 class AudioEngine:
     def __init__(self, sample_rate=44100):
         self.sample_rate = sample_rate
         self.event_queue = queue.Queue()
-
-        # Base open string frequencies: E2, A2, D3, G3, B3, e4
         self.open_frequencies = [82.41, 110.00, 146.83, 196.00, 246.94, 329.63]
         self.current_frequencies = list(self.open_frequencies)
-
-        # Base tuning offsets
-        self.current_frets = [0, 0, 0, 0, 0, 0]
-        self.capo_fret = 0
-
         self.active_strings = [None] * 6
+
         self._ir = _make_body_ir(sample_rate)
         self._ir_overlap = np.zeros(len(self._ir) - 1, dtype=np.float32)
+
         self._iir_sections = _biquad_coeffs(sample_rate)
         self._iir_states = [[0.0, 0.0] for _ in self._iir_sections]
 
@@ -118,22 +100,12 @@ class AudioEngine:
         self.stream.stop()
 
     def set_chord(self, fret_positions):
-        """Accepts an array like [0, 3, 2, 0, 1, 0] or [-1, 0, 2, 2, 1, 0]"""
-        self.current_frets = fret_positions
-        self._recalculate_pitches()
-
-    def set_capo(self, fret):
-        """Applies global capo pitch shift across all strings."""
-        self.capo_fret = fret
-        self._recalculate_pitches()
-
-    def _recalculate_pitches(self):
-        for i, fret in enumerate(self.current_frets):
+        """Accepts an array like [0, 2, 2, 1, 0, 0] (-1 drops string out completely)"""
+        for i, fret in enumerate(fret_positions):
             if fret == -1:
                 self.current_frequencies[i] = 0.0
             else:
-                total_fret = fret + self.capo_fret
-                self.current_frequencies[i] = self.open_frequencies[i] * (2.0 ** (total_fret / 12.0))
+                self.current_frequencies[i] = self.open_frequencies[i] * (2.0 ** (fret / 12.0))
 
     def trigger_pluck(self, string_idx, pressure):
         if self.current_frequencies[string_idx] > 0:
@@ -150,8 +122,8 @@ class AudioEngine:
             if vel < 0.6:
                 noise = np.convolve(noise, np.ones(3) / 3, mode='same').astype(np.float32)
             noise *= vel
-
-            self.active_strings[idx] = [noise, 0, _DBASE[idx] + vel * _DVEL[idx], _S[idx], 0.0]
+            S, decay = _S[idx], _DBASE[idx] + vel * _DVEL[idx]
+            self.active_strings[idx] = [noise, 0, decay, S, 0.0]
 
         buffer_out = np.zeros(frames, dtype=np.float32)
         for i in range(6):
@@ -176,17 +148,18 @@ class AudioEngine:
         body_iir = _apply_biquad_cascade(buffer_out.copy(), self._iir_sections, self._iir_states)
         full_conv = np.convolve(buffer_out, self._ir).astype(np.float32)
 
+        # Safe structural overlap alignment matrix mapping block limits cleanly
         accum = np.zeros(max(len(self._ir_overlap), len(full_conv)), dtype=np.float32)
         accum[:len(self._ir_overlap)] += self._ir_overlap
         accum[:len(full_conv)] += full_conv
         body_ir_conv = accum[:frames]
         self._ir_overlap = accum[frames:frames + len(self._ir) - 1]
 
-        final_mix = (buffer_out * 0.40 + body_iir * 0.35 + body_ir_conv * 0.25)
+        final_mix = (buffer_out * 0.45 + body_iir * 0.35 + body_ir_conv * 0.20)
 
-        # --- ANTI-COLLISION SOFT LIMITER ---
+        # Headroom Limiter
         for f in range(frames):
-            val = final_mix[f] * 0.5
+            val = final_mix[f] * 0.38
             if abs(val) > 0.25:
                 val = np.sign(val) * (0.25 + 0.75 * np.tanh((abs(val) - 0.25) / 0.75))
             final_mix[f] = val
