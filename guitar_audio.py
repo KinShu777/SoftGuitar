@@ -67,28 +67,28 @@ class AudioEngine:
         self.open_frequencies = [82.41, 110.00, 146.83, 196.00, 246.94, 329.63]
         self.current_frequencies = list(self.open_frequencies)
 
-        # Pre-allocated maximum delay line arrays to handle structural upper bounds
-        self.max_delay_size = int(sample_rate / 40.0)  # Safe buffer down to a low 40Hz note
+        self.max_delay_size = int(sample_rate / 40.0)
         self.ring_buffers = np.zeros((6, self.max_delay_size), dtype=np.float32)
         self.buffer_lengths = np.zeros(6, dtype=np.int32)
         self.buffer_pointers = np.zeros(6, dtype=np.int32)
 
-        # PRE-ALLOCATED NOISE RESERVOIRS (Pure Zero-Allocation System)
+        # FRACTIONAL ALL-PASS FILTER MEMORY STATES
+        self.ap_coeffs = np.zeros(6, dtype=np.float32)
+        self.ap_x1 = np.zeros(6, dtype=np.float32)  # Previous input state x[n-1]
+        self.ap_y1 = np.zeros(6, dtype=np.float32)  # Previous output state y[n-1]
+
         self.noise_pool_size = 44100
         self.raw_noise_pool = np.random.uniform(-1.0, 1.0, self.noise_pool_size).astype(np.float32)
         self.soft_noise_pool = np.convolve(self.raw_noise_pool, np.ones(3) / 3, mode='same').astype(np.float32)
         self.noise_index = 0
 
-        # State tracking matrices
         self.string_active = np.zeros(6, dtype=bool)
         self.string_decay = np.zeros(6, dtype=np.float32)
         self.string_S = np.zeros(6, dtype=np.float32)
 
-        # Pre-allocated convolution overlap and mixer buffers
         self._ir = _make_body_ir(sample_rate)
         self._ir_overlap = np.zeros(len(self._ir) - 1, dtype=np.float32)
 
-        # Pre-allocate a steady workspace accumulation buffer for safe overlap addition
         self.accum_buffer = np.zeros(256 + len(self._ir) - 1, dtype=np.float32)
         self.mix_buffer = np.zeros(256, dtype=np.float32)
         self.iir_buffer = np.zeros(256, dtype=np.float32)
@@ -120,7 +120,6 @@ class AudioEngine:
             self.event_queue.put((string_idx, float(np.clip(pressure, 0.1, 1.0))))
 
     def _audio_callback(self, outdata, frames, time, status):
-        # Clear out main mixing buffer in-place
         self.mix_buffer.fill(0.0)
 
         # --- PROCESS PLUCK EVENTS ---
@@ -129,31 +128,44 @@ class AudioEngine:
             freq = self.current_frequencies[idx]
             if freq == 0.0: continue
 
-            buf_size = int(self.sample_rate / freq)
-            if buf_size > self.max_delay_size: buf_size = self.max_delay_size
+            # Exact fractional period calculation
+            exact_period = self.sample_rate / freq
+            int_period = int(exact_period)
+            frac_period = exact_period - int_period
 
-            self.buffer_lengths[idx] = buf_size
+            # If the fraction is too low, shift an integer step back to maintain filter stability
+            if frac_period < 0.1:
+                frac_period += 1.0
+                int_period -= 1
+
+            if int_period > self.max_delay_size: int_period = self.max_delay_size
+
+            self.buffer_lengths[idx] = int_period
             self.buffer_pointers[idx] = 0
 
-            start_p = self.noise_index
-            end_p = start_p + buf_size
+            # Calculate All-Pass Phase filter coefficient
+            self.ap_coeffs[idx] = (1.0 - frac_period) / (1.0 + frac_period)
+            self.ap_x1[idx] = 0.0
+            self.ap_y1[idx] = 0.0
 
+            start_p = self.noise_index
+            end_p = start_p + int_period
             pool = self.soft_noise_pool if vel < 0.6 else self.raw_noise_pool
 
             if end_p < self.noise_pool_size:
-                self.ring_buffers[idx, :buf_size] = pool[start_p:end_p] * vel
+                self.ring_buffers[idx, :int_period] = pool[start_p:end_p] * vel
                 self.noise_index = end_p
             else:
                 rem = self.noise_pool_size - start_p
                 self.ring_buffers[idx, :rem] = pool[start_p:] * vel
-                self.ring_buffers[idx, rem:buf_size] = pool[:buf_size - rem] * vel
-                self.noise_index = buf_size - rem
+                self.ring_buffers[idx, rem:int_period] = pool[:int_period - rem] * vel
+                self.noise_index = int_period - rem
 
             self.string_S[idx] = _S[idx]
             self.string_decay[idx] = _DBASE[idx] + vel * _DVEL[idx]
             self.string_active[idx] = True
 
-        # --- REAL-TIME WAVEGUIDE CORE LOOP ---
+        # --- REAL-TIME WAVEGUIDE ENGINE WITH FRACTIONAL INTONATION ---
         for i in range(6):
             if not self.string_active[i]: continue
 
@@ -163,22 +175,38 @@ class AudioEngine:
             Sc = self.string_S[i]
             Sc1 = 1.0 - Sc
 
+            ap_c = self.ap_coeffs[i]
+            ax1 = self.ap_x1[i]
+            ay1 = self.ap_y1[i]
+
             for f in range(frames):
                 cur = self.ring_buffers[i, ptr]
                 nxt_ptr = (ptr + 1) % buf_len
                 nxt = self.ring_buffers[i, nxt_ptr]
 
-                self.mix_buffer[f] += cur
-                self.ring_buffers[i, ptr] = (Sc * cur + Sc1 * nxt) * dec
+                # Standard low-pass string loss element
+                waveguide_sample = (Sc * cur + Sc1 * nxt) * dec
+
+                # Fractional All-Pass filter execution: y[n] = C*x[n] + x[n-1] - C*y[n-1]
+                fractional_sample = ap_c * waveguide_sample + ax1 - ap_c * ay1
+
+                # Update history states
+                ax1 = waveguide_sample
+                ay1 = fractional_sample
+
+                self.mix_buffer[f] += fractional_sample
+                self.ring_buffers[i, ptr] = fractional_sample
                 ptr = nxt_ptr
 
             self.buffer_pointers[i] = ptr
+            self.ap_x1[i] = ax1
+            self.ap_y1[i] = ay1
+
             if np.max(np.abs(self.ring_buffers[i, :buf_len])) < 0.0004:
                 self.string_active[i] = False
 
-        # --- PROCESS RESONANCE CHAIN IN-PLACE ---
+        # --- RESONANCE CHAIN ---
         np.copyto(self.iir_buffer, self.mix_buffer)
-
         for k, (b, a) in enumerate(self._iir_sections):
             w1, w2 = self._iir_states[k]
             for n in range(frames):
@@ -187,22 +215,17 @@ class AudioEngine:
                 w2, w1 = w1, w0
             self._iir_states[k] = [w1, w2]
 
-        # --- ZERO-ALLOCATION OVERLAP-ADD SYSTEM ---
+        # --- OVERLAP-ADD ---
         self.accum_buffer.fill(0.0)
-        # 1. Load the previous block's tail overlap directly into the tracking matrix
         self.accum_buffer[:len(self._ir_overlap)] += self._ir_overlap
 
-        # 2. Convolve current frame blocks
         full_conv = np.convolve(self.mix_buffer, self._ir).astype(np.float32)
         self.accum_buffer[:len(full_conv)] += full_conv
 
-        # 3. Pull out the clean output frame segment safely
         body_ir_conv = self.accum_buffer[:frames]
-
-        # 4. Cache the leftover ring-out tail directly into the permanent overlap state array
         self._ir_overlap[:] = self.accum_buffer[frames:frames + len(self._ir_overlap)]
 
-        # --- HEADROOM MIXING & COMPRESSION ---
+        # --- FINAL MIX & LIMITER ---
         for f in range(frames):
             val = (self.mix_buffer[f] * 0.45 + self.iir_buffer[f] * 0.35 + body_ir_conv[f] * 0.20) * 0.38
             if abs(val) > 0.25:
