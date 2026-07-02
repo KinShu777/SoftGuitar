@@ -72,10 +72,9 @@ class AudioEngine:
         self.buffer_lengths = np.zeros(6, dtype=np.int32)
         self.buffer_pointers = np.zeros(6, dtype=np.int32)
 
-        # FRACTIONAL ALL-PASS FILTER MEMORY STATES
         self.ap_coeffs = np.zeros(6, dtype=np.float32)
-        self.ap_x1 = np.zeros(6, dtype=np.float32)  # Previous input state x[n-1]
-        self.ap_y1 = np.zeros(6, dtype=np.float32)  # Previous output state y[n-1]
+        self.ap_x1 = np.zeros(6, dtype=np.float32)
+        self.ap_y1 = np.zeros(6, dtype=np.float32)
 
         self.noise_pool_size = 44100
         self.raw_noise_pool = np.random.uniform(-1.0, 1.0, self.noise_pool_size).astype(np.float32)
@@ -128,12 +127,10 @@ class AudioEngine:
             freq = self.current_frequencies[idx]
             if freq == 0.0: continue
 
-            # Exact fractional period calculation
             exact_period = self.sample_rate / freq
             int_period = int(exact_period)
             frac_period = exact_period - int_period
 
-            # If the fraction is too low, shift an integer step back to maintain filter stability
             if frac_period < 0.1:
                 frac_period += 1.0
                 int_period -= 1
@@ -143,7 +140,6 @@ class AudioEngine:
             self.buffer_lengths[idx] = int_period
             self.buffer_pointers[idx] = 0
 
-            # Calculate All-Pass Phase filter coefficient
             self.ap_coeffs[idx] = (1.0 - frac_period) / (1.0 + frac_period)
             self.ap_x1[idx] = 0.0
             self.ap_y1[idx] = 0.0
@@ -161,11 +157,15 @@ class AudioEngine:
                 self.ring_buffers[idx, rem:int_period] = pool[:int_period - rem] * vel
                 self.noise_index = int_period - rem
 
+            # --- SOLIDIFIED DYNAMIC DECAY LOGIC ---
+            # Explicit scalar type conversion ensures the audio thread reads it cleanly
+            decay_mod = 0.0015 * (vel - 0.5)
+            self.string_decay[idx] = float(np.clip(_DBASE[idx] + decay_mod, 0.985, 0.998))
+
             self.string_S[idx] = _S[idx]
-            self.string_decay[idx] = _DBASE[idx] + vel * _DVEL[idx]
             self.string_active[idx] = True
 
-        # --- REAL-TIME WAVEGUIDE ENGINE WITH FRACTIONAL INTONATION ---
+        # --- REAL-TIME WAVEGUIDE ENGINE ---
         for i in range(6):
             if not self.string_active[i]: continue
 
@@ -184,13 +184,9 @@ class AudioEngine:
                 nxt_ptr = (ptr + 1) % buf_len
                 nxt = self.ring_buffers[i, nxt_ptr]
 
-                # Standard low-pass string loss element
                 waveguide_sample = (Sc * cur + Sc1 * nxt) * dec
-
-                # Fractional All-Pass filter execution: y[n] = C*x[n] + x[n-1] - C*y[n-1]
                 fractional_sample = ap_c * waveguide_sample + ax1 - ap_c * ay1
 
-                # Update history states
                 ax1 = waveguide_sample
                 ay1 = fractional_sample
 
