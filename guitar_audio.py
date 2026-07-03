@@ -22,7 +22,8 @@ def _make_body_ir(sr: int, length_ms: float = 28.0) -> np.ndarray:
     ir += 0.30 * np.sin(2 * np.pi * 390 * t) * np.exp(-t / 0.010)
     ir += 0.15 * np.sin(2 * np.pi * 780 * t) * np.exp(-t / 0.005)
     ir /= np.max(np.abs(ir) + 1e-9)
-    return ir.astype(np.float32)
+    # Return reversed order to allow a direct dot-product sliding convolution
+    return ir[::-1].astype(np.float32)
 
 
 def _biquad_coeffs(sr):
@@ -61,7 +62,6 @@ def _biquad_coeffs(sr):
 
 
 class AudioEngine:
-    # BUILT-IN CHORD VOICING DICTIONARY
     CHORD_DICTIONARY = {
         "Open": [0, 0, 0, 0, 0, 0],
         "C Major": [-1, 3, 2, 0, 1, 0],
@@ -80,7 +80,6 @@ class AudioEngine:
         self.open_frequencies = [82.41, 110.00, 146.83, 196.00, 246.94, 329.63]
         self.current_frequencies = list(self.open_frequencies)
 
-        # Global Capo Tracking Register (0 = No Capo, 1 = 1st Fret, etc.)
         self.capo_fret = 0
         self.current_fret_positions = [0] * 6
 
@@ -102,10 +101,15 @@ class AudioEngine:
         self.string_decay = np.zeros(6, dtype=np.float32)
         self.string_S = np.zeros(6, dtype=np.float32)
 
+        # --- ALLOCATION-FREE CONVOLUTION STORAGE ---
+        # Note: _ir is pre-reversed in _make_body_ir to optimize dot products
         self._ir = _make_body_ir(sample_rate)
-        self._ir_overlap = np.zeros(len(self._ir) - 1, dtype=np.float32)
+        self.ir_len = len(self._ir)
 
-        self.accum_buffer = np.zeros(256 + len(self._ir) - 1, dtype=np.float32)
+        # Pre-allocate input history buffer tracking line (IR length + block length)
+        self.conv_history = np.zeros(self.ir_len + 256, dtype=np.float32)
+        self.body_ir_conv = np.zeros(256, dtype=np.float32)
+
         self.mix_buffer = np.zeros(256, dtype=np.float32)
         self.iir_buffer = np.zeros(256, dtype=np.float32)
 
@@ -125,28 +129,23 @@ class AudioEngine:
         self.stream.stop()
 
     def set_capo(self, fret):
-        """Sets the global capo position and recalculates current string pitches."""
         self.capo_fret = max(0, min(12, int(fret)))
         self._reapply_pitches()
 
     def set_chord(self, chord_input):
-        """Accepts either a string chord name (e.g., 'C Major') or an explicit fret list."""
         if isinstance(chord_input, str):
             positions = self.CHORD_DICTIONARY.get(chord_input, [0, 0, 0, 0, 0, 0])
         else:
             positions = chord_input
-
         self.current_fret_positions = list(positions)
         self._reapply_pitches()
 
     def _reapply_pitches(self):
-        """Applies fret array choices combined with the global Capo offset."""
         for i in range(6):
             fret = self.current_fret_positions[i]
             if fret == -1:
-                self.current_frequencies[i] = 0.0  # Muted string
+                self.current_frequencies[i] = 0.0
             else:
-                # Total half-steps = fret relative to capo + global capo fret position
                 total_frets = fret + self.capo_fret
                 self.current_frequencies[i] = self.open_frequencies[i] * (2.0 ** (total_frets / 12.0))
 
@@ -235,7 +234,7 @@ class AudioEngine:
             if np.max(np.abs(self.ring_buffers[i, :buf_len])) < 0.0004:
                 self.string_active[i] = False
 
-        # --- RESONANCE CHAIN ---
+        # --- RESONANCE CHAIN (IIR) ---
         np.copyto(self.iir_buffer, self.mix_buffer)
         for k, (b, a) in enumerate(self._iir_sections):
             w1, w2 = self._iir_states[k]
@@ -245,19 +244,20 @@ class AudioEngine:
                 w2, w1 = w1, w0
             self._iir_states[k] = [w1, w2]
 
-        # --- OVERLAP-ADD ---
-        self.accum_buffer.fill(0.0)
-        self.accum_buffer[:len(self._ir_overlap)] += self._ir_overlap
+        # --- ZERO-ALLOCATION SLIDING CONVOLUTION ---
+        # 1. Shift old history components down to clear space at the end of the buffer
+        self.conv_history[:self.ir_len - 1] = self.conv_history[frames:frames + self.ir_len - 1]
 
-        full_conv = np.convolve(self.mix_buffer, self._ir).astype(np.float32)
-        self.accum_buffer[:len(full_conv)] += full_conv
+        # 2. Copy the fresh audio block directly into the available space
+        self.conv_history[self.ir_len - 1:self.ir_len - 1 + frames] = self.mix_buffer
 
-        body_ir_conv = self.accum_buffer[:frames]
-        self._ir_overlap[:] = self.accum_buffer[frames:frames + len(self._ir_overlap)]
+        # 3. Compute the sliding convolution using an allocation-free vector dot product loop
+        for n in range(frames):
+            self.body_ir_conv[n] = np.dot(self.conv_history[n:n + self.ir_len], self._ir)
 
         # --- FINAL MIX & LIMITER ---
         for f in range(frames):
-            val = (self.mix_buffer[f] * 0.45 + self.iir_buffer[f] * 0.35 + body_ir_conv[f] * 0.20) * 0.38
+            val = (self.mix_buffer[f] * 0.45 + self.iir_buffer[f] * 0.35 + self.body_ir_conv[f] * 0.20) * 0.38
             if abs(val) > 0.25:
                 val = np.sign(val) * (0.25 + 0.75 * np.tanh((abs(val) - 0.25) / 0.75))
             outdata[f, 0] = val
