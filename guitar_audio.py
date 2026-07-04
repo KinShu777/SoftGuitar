@@ -100,6 +100,7 @@ class AudioEngine:
         self.string_active = np.zeros(6, dtype=bool)
         self.string_decay = np.zeros(6, dtype=np.float32)
         self.string_S = np.zeros(6, dtype=np.float32)
+        self.palm_mute = 0.0
 
         # --- ALLOCATION-FREE CONVOLUTION STORAGE ---
         # Note: _ir is pre-reversed in _make_body_ir to optimize dot products
@@ -139,6 +140,11 @@ class AudioEngine:
             positions = chord_input
         self.current_fret_positions = list(positions)
         self._reapply_pitches()
+
+    def set_palm_mute(self, value):
+        """Sets the global palm muting intensity value [0.0 to 1.0]."""
+        self.palm_mute = float(np.clip(value, 0.0, 1.0))
+
 
     def _reapply_pitches(self):
         for i in range(6):
@@ -199,13 +205,14 @@ class AudioEngine:
             self.string_active[idx] = True
 
         # --- REAL-TIME WAVEGUIDE ENGINE ---
+        pm = self.palm_mute
         for i in range(6):
             if not self.string_active[i]: continue
 
             buf_len = self.buffer_lengths[i]
             ptr = self.buffer_pointers[i]
-            dec = self.string_decay[i]
-            Sc = self.string_S[i]
+            dec = self.string_decay[i] * (1.0 - pm * 0.12)
+            Sc = self.string_S[i] * (1.0 - pm) + 0.5 * pm
             Sc1 = 1.0 - Sc
 
             ap_c = self.ap_coeffs[i]

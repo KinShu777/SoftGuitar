@@ -102,6 +102,18 @@ class MainWindow(QMainWindow):
         sb_layout.addWidget(self.capo_box)
 
         sb_layout.addSpacing(20)
+        self.pm_lbl = QLabel("Palm Mute Intensity")
+        self.pm_lbl.setStyleSheet("color: #a2a5b3; font-family: 'Arial'; font-weight: bold; font-size: 11px;")
+        sb_layout.addWidget(self.pm_lbl)
+
+        self.pm_slider = QSlider(Qt.Orientation.Horizontal)
+        self.pm_slider.setRange(0, 100)
+        self.pm_slider.setValue(0)
+        self.pm_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.pm_slider.valueChanged.connect(self.handle_palm_mute_slider_change)
+        sb_layout.addWidget(self.pm_slider)
+
+        sb_layout.addSpacing(20)
 
         # Spacing Bound Sliders
         self.spacing_lbl = QLabel("Strum Area Bounds")
@@ -147,6 +159,9 @@ class MainWindow(QMainWindow):
             self.audio.open_frequencies[i] = self.open_strings[i] * (2.0 ** (fret_value / 12.0))
         # Recalculate immediate playback arrays inside callback
         self.audio.set_chord([0, 0, 0, 0, 0, 0])
+
+    def handle_palm_mute_slider_change(self, value):
+        self.audio.set_palm_mute(value / 100.0)
 
     def open_new_preset_wizard(self):
         editor = PresetEditor(self)

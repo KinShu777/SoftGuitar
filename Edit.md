@@ -1,0 +1,5 @@
+- Investigate callback spikes.
+- Investigate GC behavior.
+- Investigate Numba acceleration.
+- Consider circular convolution buffer.
+- Revisit queue.Queue.
