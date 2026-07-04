@@ -239,6 +239,19 @@ class MainWindow(QMainWindow):
         self.setFocus()  # Re-focus window so keyboard captures hit cleanly
 
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key_H:
+            # Hammer-on test simulation: Shift active strings instantly up 2 frets
+            for i in range(6):
+                if self.audio.string_active[i]:
+                    self.audio.legato_transition(string_idx=i, target_fret=2, is_hammer=True)
+            return
+
+        if event.key() == Qt.Key_P:
+            # Pull-off test simulation: Shift active strings back down to open positions (fret 0)
+            for i in range(6):
+                if self.audio.string_active[i]:
+                    self.audio.legato_transition(string_idx=i, target_fret=0, is_hammer=False)
+            return
         """Monitors global engine scope to shift target chord frequencies cleanly."""
         key_text = event.text()
         if self.active_chord_map and key_text in self.active_chord_map:

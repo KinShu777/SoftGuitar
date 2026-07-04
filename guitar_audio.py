@@ -161,6 +161,16 @@ class AudioEngine:
         if self.current_frequencies[string_idx] > 0:
             self.event_queue.put((string_idx, float(np.clip(pressure, 0.1, 1.0))))
 
+    def legato_transition(self, string_idx, target_fret, is_hammer=True):
+        """Executes a smooth legato transition (hammer-on or pull-off) on an active string."""
+        if 0 <= string_idx < 6 and self.string_active[string_idx]:
+            # Calculate new frequency based on string's open pitch + target fret
+            total_frets = target_fret + self.capo_fret
+            new_freq = self.open_frequencies[string_idx] * (2.0 ** (total_frets / 12.0))
+
+            # Queue a legato change event tuple
+            self.event_queue.put((string_idx, "LEGATO", new_freq, is_hammer))
+
     def set_harmonic_node(self, node_value):
         """Sets the active natural harmonic fret node target.
         Supported options: 0 (disabled), 5, 7, 12
@@ -174,70 +184,80 @@ class AudioEngine:
         self.mix_buffer.fill(0.0)
 
         # --- PROCESS PLUCK EVENTS ---
+        # --- REPLACE EVENT QUEUE UNPACKING INSIDE _audio_callback ---
         while not self.event_queue.empty():
-            idx, vel = self.event_queue.get_nowait()
-            freq = self.current_frequencies[idx]
-            if freq == 0.0: continue
+            event_data = self.event_queue.get_nowait()
 
-            exact_period = self.sample_rate / freq
-            int_period = int(exact_period)
-            frac_period = exact_period - int_period
+            # Check if this is a standard pluck or a legato transition
+            if len(event_data) == 4 and event_data[1] == "LEGATO":
+                idx, _, new_freq, is_hammer = event_data
+                if not self.string_active[idx]: continue
 
-            if frac_period < 0.1:
-                frac_period += 1.0
-                int_period -= 1
+                # Recalculate target delay periods on the fly
+                exact_period = self.sample_rate / new_freq
+                int_period = int(exact_period)
+                frac_period = exact_period - int_period
+                if frac_period < 0.1:
+                    frac_period += 1.0
+                    int_period -= 1
+                if int_period > self.max_delay_size: int_period = self.max_delay_size
 
-            if int_period > self.max_delay_size: int_period = self.max_delay_size
+                self.buffer_lengths[idx] = int_period
+                self.ap_coeffs[idx] = (1.0 - frac_period) / (1.0 + frac_period)
 
-            self.buffer_lengths[idx] = int_period
-            self.buffer_pointers[idx] = 0
+                # Energy Injection Phase without full re-pluck white noise
+                ptr = self.buffer_pointers[idx]
+                if is_hammer:
+                    # Hammer-on: Inject a tiny, highly localized low-pass step impulse (soft thud)
+                    # We inject a soft localized pulse into the first few values of the buffer
+                    for k in range(min(4, int_period)):
+                        self.ring_buffers[idx, (ptr + k) % int_period] += 0.08 * (1.0 - k * 0.25)
+                else:
+                    # Pull-off: Inject a slightly larger, broader pluck excitation to simulate a finger release snap
+                    pool = self.soft_noise_pool
+                    start_p = self.noise_index
+                    inj_len = min(int_period // 3, 32)
 
-            self.ap_coeffs[idx] = (1.0 - frac_period) / (1.0 + frac_period)
-            self.ap_x1[idx] = 0.0
-            self.ap_y1[idx] = 0.0
+                    for k in range(inj_len):
+                        noise_val = pool[(start_p + k) % self.noise_pool_size]
+                        self.ring_buffers[idx, (ptr + k) % int_period] += noise_val * 0.18
 
-            start_p = self.noise_index
-            end_p = start_p + int_period
-            pool = self.soft_noise_pool if vel < 0.6 else self.raw_noise_pool
+                    self.noise_index = (start_p + inj_len) % self.noise_pool_size
+                continue
 
-            if end_p < self.noise_pool_size:
-                self.ring_buffers[idx, :int_period] = pool[start_p:end_p] * vel
-            node = self.harmonic_node
-
-            # Fetch base excitation block matching the required period
-            if end_p < self.noise_pool_size:
-                excitation = pool[start_p:end_p].copy() * vel
-                self.noise_index = end_p
             else:
-                rem = self.noise_pool_size - start_p
-                excitation = np.concatenate([pool[start_p:], pool[:int_period - rem]]) * vel
-                self.noise_index = int_period - rem
+                # Standard legacy pluck code path execution
+                idx, vel = event_data
+                freq = self.current_frequencies[idx]
+                if freq == 0.0: continue
+                exact_period = self.sample_rate / freq
+                int_period = int(exact_period)
+                frac_period = exact_period - int_period
+                if frac_period < 0.1:
+                    frac_period += 1.0
+                    int_period -= 1
+                if int_period > self.max_delay_size: int_period = self.max_delay_size
+                self.buffer_lengths[idx] = int_period
+                self.buffer_pointers[idx] = 0
+                self.ap_coeffs[idx] = (1.0 - frac_period) / (1.0 + frac_period)
+                self.ap_x1[idx] = 0.0
+                self.ap_y1[idx] = 0.0
 
-            # Periodic Mode Suppression: Repeat a fractional pattern to isolate nodes across the full array
-            if node > 0 and int_period > 8:
-                if node == 12:
-                    # 12th Fret (2nd Harmonic): Repeat a half-period pattern twice
-                    half = int_period // 2
-                    excitation[half:half * 2] = excitation[:half]
-                elif node == 7:
-                    # 7th Fret (3rd Harmonic): Repeat a third-period pattern three times
-                    third = int_period // 3
-                    excitation[third:third * 2] = excitation[:third]
-                    excitation[third * 2:third * 3] = excitation[:third]
-                elif node == 5:
-                    # 5th Fret (4th Harmonic): Repeat a quarter-period pattern four times
-                    quarter = int_period // 4
-                    excitation[quarter:quarter * 2] = excitation[:quarter]
-                    excitation[quarter * 2:quarter * 3] = excitation[:quarter]
-                    excitation[quarter * 3:quarter * 4] = excitation[:quarter]
-
-            self.ring_buffers[idx, :int_period] = excitation
-
-            decay_mod = 0.0015 * (vel - 0.5)
-            self.string_decay[idx] = float(np.clip(_DBASE[idx] + decay_mod, 0.985, 0.998))
-
-            self.string_S[idx] = _S[idx]
-            self.string_active[idx] = True
+                start_p = self.noise_index
+                end_p = start_p + int_period
+                pool = self.soft_noise_pool if vel < 0.6 else self.raw_noise_pool
+                if end_p < self.noise_pool_size:
+                    self.ring_buffers[idx, :int_period] = pool[start_p:end_p] * vel
+                    self.noise_index = end_p
+                else:
+                    rem = self.noise_pool_size - start_p
+                    self.ring_buffers[idx, :rem] = pool[start_p:] * vel
+                    self.ring_buffers[idx, rem:int_period] = pool[:int_period - rem] * vel
+                    self.noise_index = int_period - rem
+                decay_mod = 0.0015 * (vel - 0.5)
+                self.string_decay[idx] = float(np.clip(_DBASE[idx] + decay_mod, 0.985, 0.998))
+                self.string_S[idx] = _S[idx]
+                self.string_active[idx] = True
 
         # --- REAL-TIME WAVEGUIDE ENGINE ---
         pm = self.palm_mute

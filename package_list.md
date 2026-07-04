@@ -1,0 +1,14 @@
+Package            Version
+------------------ -------
+cffi               2.0.0
+numpy              2.5.0
+pip                26.0.1
+pycparser          3.0
+PyQt6              6.11.0
+PyQt6-Qt6          6.11.1
+PyQt6_sip          13.11.1
+PySide6            6.11.1
+PySide6_Addons     6.11.1
+PySide6_Essentials 6.11.1
+shiboken6          6.11.1
+sounddevice        0.5.5
