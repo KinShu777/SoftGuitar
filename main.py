@@ -102,6 +102,25 @@ class MainWindow(QMainWindow):
         sb_layout.addWidget(self.capo_box)
 
         sb_layout.addSpacing(20)
+        from PySide6.QtWidgets import QComboBox
+        self.harmonic_lbl = QLabel("Natural Harmonics Mode")
+        self.harmonic_lbl.setStyleSheet("color: #a2a5b3; font-family: 'Arial'; font-weight: bold; font-size: 11px;")
+        sb_layout.addWidget(self.harmonic_lbl)
+
+        self.harmonic_combo = QComboBox()
+        self.harmonic_combo.addItems(
+            ["Standard Open Notes", "12th Fret Harmonic", "7th Fret Harmonic", "5th Fret Harmonic"])
+        self.harmonic_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.harmonic_combo.setStyleSheet("""
+                    QComboBox {
+                        background-color: #13151c;
+                        border: 1px solid #222531;
+                        color: #e2e4ed;
+                        padding: 4px;
+                    }
+                """)
+        self.harmonic_combo.currentIndexChanged.connect(self.handle_harmonic_combobox_change)
+        sb_layout.addWidget(self.harmonic_combo)
         self.pm_lbl = QLabel("Palm Mute Intensity")
         self.pm_lbl.setStyleSheet("color: #a2a5b3; font-family: 'Arial'; font-weight: bold; font-size: 11px;")
         sb_layout.addWidget(self.pm_lbl)
@@ -159,6 +178,11 @@ class MainWindow(QMainWindow):
             self.audio.open_frequencies[i] = self.open_strings[i] * (2.0 ** (fret_value / 12.0))
         # Recalculate immediate playback arrays inside callback
         self.audio.set_chord([0, 0, 0, 0, 0, 0])
+
+    def handle_harmonic_combobox_change(self, index):
+        mapping = {0: 0, 1: 12, 2: 7, 3: 5}
+        target_node = mapping.get(index, 0)
+        self.audio.set_harmonic_node(target_node)
 
     def handle_palm_mute_slider_change(self, value):
         self.audio.set_palm_mute(value / 100.0)

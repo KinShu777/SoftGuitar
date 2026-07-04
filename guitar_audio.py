@@ -101,6 +101,8 @@ class AudioEngine:
         self.string_decay = np.zeros(6, dtype=np.float32)
         self.string_S = np.zeros(6, dtype=np.float32)
         self.palm_mute = 0.0
+        # 0 = Disabled/Normal, 12 = 12th Fret Node, 7 = 7th Fret Node, 5 = 5th Fret Node
+        self.harmonic_node = 0
 
         # --- ALLOCATION-FREE CONVOLUTION STORAGE ---
         # Note: _ir is pre-reversed in _make_body_ir to optimize dot products
@@ -159,6 +161,15 @@ class AudioEngine:
         if self.current_frequencies[string_idx] > 0:
             self.event_queue.put((string_idx, float(np.clip(pressure, 0.1, 1.0))))
 
+    def set_harmonic_node(self, node_value):
+        """Sets the active natural harmonic fret node target.
+        Supported options: 0 (disabled), 5, 7, 12
+        """
+        if node_value in [0, 5, 7, 12]:
+            self.harmonic_node = int(node_value)
+        else:
+            self.harmonic_node = 0
+
     def _audio_callback(self, outdata, frames, time, status):
         self.mix_buffer.fill(0.0)
 
@@ -191,12 +202,36 @@ class AudioEngine:
 
             if end_p < self.noise_pool_size:
                 self.ring_buffers[idx, :int_period] = pool[start_p:end_p] * vel
+            node = self.harmonic_node
+
+            # Fetch base excitation block matching the required period
+            if end_p < self.noise_pool_size:
+                excitation = pool[start_p:end_p].copy() * vel
                 self.noise_index = end_p
             else:
                 rem = self.noise_pool_size - start_p
-                self.ring_buffers[idx, :rem] = pool[start_p:] * vel
-                self.ring_buffers[idx, rem:int_period] = pool[:int_period - rem] * vel
+                excitation = np.concatenate([pool[start_p:], pool[:int_period - rem]]) * vel
                 self.noise_index = int_period - rem
+
+            # Periodic Mode Suppression: Repeat a fractional pattern to isolate nodes across the full array
+            if node > 0 and int_period > 8:
+                if node == 12:
+                    # 12th Fret (2nd Harmonic): Repeat a half-period pattern twice
+                    half = int_period // 2
+                    excitation[half:half * 2] = excitation[:half]
+                elif node == 7:
+                    # 7th Fret (3rd Harmonic): Repeat a third-period pattern three times
+                    third = int_period // 3
+                    excitation[third:third * 2] = excitation[:third]
+                    excitation[third * 2:third * 3] = excitation[:third]
+                elif node == 5:
+                    # 5th Fret (4th Harmonic): Repeat a quarter-period pattern four times
+                    quarter = int_period // 4
+                    excitation[quarter:quarter * 2] = excitation[:quarter]
+                    excitation[quarter * 2:quarter * 3] = excitation[:quarter]
+                    excitation[quarter * 3:quarter * 4] = excitation[:quarter]
+
+            self.ring_buffers[idx, :int_period] = excitation
 
             decay_mod = 0.0015 * (vel - 0.5)
             self.string_decay[idx] = float(np.clip(_DBASE[idx] + decay_mod, 0.985, 0.998))
